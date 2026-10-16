@@ -135,3 +135,18 @@ extension AppInfo {
         self.init(name: name, bundleID: bundleID, bundlePath: bundlePath, pid: nil)
     }
 }
+
+struct LimitSettingsTests {
+    @Test func savesAndRestoresSeveralLimits() throws {
+        let settings = LimitSettings(limits: [.gpu: 50, .cpu: 300, .macPower: 60], spareMainProcess: true)
+        let data = try JSONEncoder().encode(settings)
+        #expect(String(decoding: data, as: UTF8.self).contains("\"gpu\":50"))
+        #expect(try JSONDecoder().decode(LimitSettings.self, from: data) == settings)
+    }
+
+    @Test func summaryListsLimitsInAFixedOrder() {
+        let settings = LimitSettings(limits: [.gpu: 50, .cpu: 300, .macPower: 60], efficiencyCoresOnly: true)
+        #expect(settings.summary == "Mac power ≤ 60 W · CPU ≤ 300% · GPU ≤ 50% · E-cores only")
+        #expect(LimitSettings().summary == "No limit")
+    }
+}

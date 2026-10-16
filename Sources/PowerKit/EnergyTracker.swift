@@ -37,6 +37,17 @@ public struct Usage: Sendable, Equatable {
             coversGPU: a.coversGPU && b.coversGPU
         )
     }
+
+    /// The mean of several readings, or nil if there are none.
+    public static func mean(_ samples: some Collection<Usage>) -> Usage? {
+        guard !samples.isEmpty else { return nil }
+        let sum = samples.reduce(Usage(), +)
+        let n = Double(samples.count)
+        return Usage(
+            cpuWatts: sum.cpuWatts / n, gpuWatts: sum.gpuWatts / n, aneWatts: sum.aneWatts / n,
+            cpuPercent: sum.cpuPercent / n, gpuPercent: sum.gpuPercent / n, coversGPU: sum.coversGPU
+        )
+    }
 }
 
 /// Raw cumulative counters, in nanoseconds and nanojoules.

@@ -13,8 +13,8 @@ struct Rule: Codable, Identifiable, Hashable {
 
 struct AppRow: Identifiable {
     var app: AppInfo
-    /// Averaged over the last few seconds: GPU energy is billed in bursts.
-    var watts: Double
+    /// Averaged over the last few seconds: GPU time and energy are billed in bursts.
+    var usage: Usage
     var id: String { app.id }
 }
 
@@ -45,7 +45,7 @@ final class AppModel {
     }
     private var noNap: NSObjectProtocol?
     private let board = AppPowerBoard()
-    private var recentWatts: [String: [Double]] = [:]
+    private var recentUsage: [String: [Usage]] = [:]
     private var timer: Timer?
     private var icons: [String: NSImage] = [:]
 
@@ -78,14 +78,14 @@ final class AppModel {
             statuses[rule.id] = limiter.tick()
         }
         var rows: [AppRow] = []
-        var recent: [String: [Double]] = [:]
+        var recent: [String: [Usage]] = [:]
         for (app, usage) in board.sample(AppCatalog.runningApps()) {
-            let samples = (recentWatts[app.id, default: []] + [usage.watts]).suffix(5)
-            recent[app.id] = Array(samples)
-            rows.append(AppRow(app: app, watts: samples.reduce(0, +) / Double(samples.count)))
+            let samples = Array((recentUsage[app.id, default: []] + [usage]).suffix(5))
+            recent[app.id] = samples
+            rows.append(AppRow(app: app, usage: Usage.mean(samples) ?? usage))
         }
-        recentWatts = recent
-        topApps = rows.sorted { $0.watts > $1.watts }
+        recentUsage = recent
+        topApps = rows.sorted { $0.usage.watts > $1.usage.watts }
         macWatts = SystemPowerMonitor.shared.average(over: 1)
     }
 
@@ -104,7 +104,7 @@ final class AppModel {
             rules[index].isEnabled = true
             return
         }
-        rules.append(Rule(target: target, settings: LimitSettings(capKind: .macPower, capValue: 60)))
+        rules.append(Rule(target: target, settings: LimitSettings(limits: [.macPower: 60])))
     }
 
     func chooseAppToLimit() {

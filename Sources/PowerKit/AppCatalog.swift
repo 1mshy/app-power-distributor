@@ -132,4 +132,8 @@ public enum Format {
     public static func percent(_ value: Double) -> String {
         String(format: "%.0f%%", value)
     }
+
+    public static func seconds(_ value: Double) -> String {
+        value >= 1 ? String(format: "%g s", value) : String(format: "%.0f ms", value * 1000)
+    }
 }

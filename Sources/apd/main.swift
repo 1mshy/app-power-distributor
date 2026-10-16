@@ -15,24 +15,24 @@ USAGE
   apd watch <app>                   Show an app's power use without limiting it
   apd resume <app>                  Un-pause an app and take it off the E-cores
 
-CAPS (pick one)
-  --watts W        App power: CPU + GPU + Neural Engine, in watts
-  --cpu PCT        CPU use, 100 = one core (e.g. 400 = four cores)
-  --gpu PCT        Share of GPU time, 0-100
+CAPS (combine any; the strictest one sets the pace)
   --mac-watts W    Whole-Mac power, by throttling only this app
+  --watts W        App power: CPU + GPU + Neural Engine, in watts
+  --cpu PCT        CPU use as in Activity Monitor, 100 = one core (400 = four cores)
+  --gpu PCT        Share of GPU time, 0-100
 
 OPTIONS
   --ecores         Run the app on the efficiency cores only (works with or without a cap)
   --keep-ui        Never pause the app's main process; throttle only its helpers
-  --period MS      Run/pause cycle length (default 100)
+  --period MS      Run/pause cycle length (default: 1000 for GPU-heavy apps, else 100)
   --min-run PCT    Smallest share of each cycle the app always runs (default 5)
   --interval S     Seconds between measurements (default 1)
 
 <app> is an app name (“Topaz Video AI”), bundle id, path to a .app, or process name.
 
 EXAMPLES
-  apd limit "Topaz Video AI" --watts 40
   apd limit "Topaz Video AI" --mac-watts 60 --keep-ui
+  apd limit "Topaz Video AI" --gpu 50 --cpu 200 --keep-ui
   apd limit ffmpeg --cpu 300 --ecores
 """
 
@@ -48,7 +48,7 @@ func splitArguments(_ arguments: [String]) -> (app: String, options: [String]) {
 }
 
 func parseLimit(_ options: [String]) -> (settings: LimitSettings, interval: Double) {
-    var settings = LimitSettings(capKind: nil)
+    var settings = LimitSettings()
     var interval = 1.0
     var iterator = options.makeIterator()
     func number(after flag: String) -> Double {
@@ -58,9 +58,7 @@ func parseLimit(_ options: [String]) -> (settings: LimitSettings, interval: Doub
         return value
     }
     func setCap(_ kind: CapKind, _ flag: String) {
-        if settings.capKind != nil { fail("pick only one of --watts, --cpu, --gpu, --mac-watts") }
-        settings.capKind = kind
-        settings.capValue = number(after: flag)
+        settings.limits[kind] = number(after: flag)
     }
     while let option = iterator.next() {
         switch option {
@@ -81,7 +79,7 @@ func parseLimit(_ options: [String]) -> (settings: LimitSettings, interval: Doub
 
 @MainActor
 func resolveTarget(_ query: String) -> AppTarget {
-    guard !query.isEmpty else { fail("name an app, e.g. apd limit \"Topaz Video AI\" --watts 40") }
+    guard !query.isEmpty else { fail("name an app, e.g. apd limit \"Topaz Video AI\" --gpu 50") }
     do {
         return try AppCatalog.target(for: query)
     } catch {
@@ -104,8 +102,11 @@ func describe(_ status: LimiterStatus, target: AppTarget, settings: LimitSetting
         if usage.coversGPU { parts.append("GPU \(Format.percent(min(usage.gpuPercent, 100)))") }
     }
     if let mac = status.macWatts { parts.append("Mac \(Format.watts(mac))") }
-    if settings.capKind != nil {
-        parts.append(status.state == .throttled ? "running \(Format.percent(status.duty * 100)) of the time" : "under the limit")
+    if !settings.limits.isEmpty {
+        let reason = settings.limits.count > 1 ? status.tightestCap.map { " (\($0.title) limit)" } ?? "" : ""
+        parts.append(status.state == .throttled
+            ? "running \(Format.percent(status.duty * 100)) of each \(Format.seconds(status.period)) cycle\(reason)"
+            : "under the limit")
     }
     if let note = status.note { parts.append(note) }
     return parts.joined(separator: " · ")
@@ -159,7 +160,7 @@ func runLimit(_ arguments: [String], watchOnly: Bool) -> Never {
     let (query, options) = splitArguments(arguments)
     var (settings, interval) = parseLimit(options)
     if watchOnly {
-        settings.capKind = nil
+        settings.limits = [:]
         settings.efficiencyCoresOnly = false
     }
     let target = resolveTarget(query)

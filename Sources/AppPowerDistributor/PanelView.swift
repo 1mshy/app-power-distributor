@@ -93,7 +93,7 @@ struct PanelView: View {
     private var usingPowerSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             SectionTitle("Using power now")
-            let rows = model.topApps.filter { $0.watts >= 0.05 }.prefix(7)
+            let rows = model.topApps.filter { $0.usage.watts >= 0.05 }.prefix(7)
             if rows.isEmpty {
                 Text(model.topApps.isEmpty ? "Measuring…" : "Nothing is using noticeable power.")
                     .font(.callout)
@@ -102,9 +102,15 @@ struct PanelView: View {
             ForEach(Array(rows)) { row in
                 HStack(spacing: 8) {
                     Image(nsImage: model.icon(for: row.app.target)).resizable().frame(width: 18, height: 18)
-                    Text(row.app.name).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(row.app.name).lineLimit(1)
+                        Text(Self.utilization(row.usage))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                     Spacer()
-                    Text(Format.watts(row.watts))
+                    Text(Format.watts(row.usage.watts))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                     if model.hasRule(for: row.app) {
@@ -120,7 +126,19 @@ struct PanelView: View {
                 }
                 .font(.callout)
             }
+            if !rows.isEmpty {
+                Text("Watts are each app's own CPU, GPU and Neural Engine power. Memory, display and fans come on top, so the whole Mac draws more.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    static func utilization(_ usage: Usage) -> String {
+        var text = "CPU \(Format.percent(usage.cpuPercent))"
+        if usage.coversGPU { text += " · GPU \(Format.percent(min(usage.gpuPercent, 100)))" }
+        return text
     }
 
     // MARK: - Footer
@@ -213,10 +231,21 @@ private struct StatusLine: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if settings.capKind != nil, let measured = status?.measured, status?.state != .notRunning {
-                LoadBar(fraction: measured / max(settings.capValue, 0.001), throttled: status?.state == .throttled)
+            if let status, status.state != .notRunning {
+                ForEach(settings.caps.map { $0.kind }, id: \.self) { kind in
+                    if let reading = status.readings[kind], let limit = settings.limits[kind] {
+                        CapGauge(
+                            kind: kind, reading: reading, limit: limit,
+                            isHolding: status.state == .throttled && status.tightestCap == kind
+                        )
+                    }
+                }
             }
-            Text(text).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
             if let note = status?.note {
                 Text(note).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
@@ -232,17 +261,38 @@ private struct StatusLine: View {
             return "Measuring…"
         case .unthrottled, .throttled:
             var parts: [String] = []
-            if let kind = settings.capKind, let measured = status.measured {
-                parts.append("\(kind.format(measured)) of \(kind.formatLimit(settings.capValue))")
+            if !settings.limits.isEmpty {
+                parts.append(status.state == .throttled ? "Running \(Format.percent(status.duty * 100)) of the time" : "Not throttled")
             }
-            if let usage = status.usage, settings.capKind != .appPower {
-                parts.append("app \(Format.watts(usage.watts))")
-            }
-            if settings.capKind != nil {
-                parts.append(status.state == .throttled ? "running \(Format.percent(status.duty * 100)) of the time" : "not throttled")
+            // Whatever isn't already shown as a gauge.
+            if let usage = status.usage {
+                if settings.limits[.cpu] == nil { parts.append("CPU \(Format.percent(usage.cpuPercent))") }
+                if settings.limits[.gpu] == nil && usage.coversGPU { parts.append("GPU \(Format.percent(min(usage.gpuPercent, 100)))") }
+                if settings.limits[.appPower] == nil { parts.append("app \(Format.watts(usage.watts))") }
             }
             return parts.joined(separator: " · ")
         }
+    }
+}
+
+/// One limit's current reading against its cap.
+private struct CapGauge: View {
+    let kind: CapKind
+    let reading: Double
+    let limit: Double
+    /// This is the limit the app is being slowed down for.
+    let isHolding: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(kind.shortTitle).frame(width: 28, alignment: .leading)
+            LoadBar(fraction: reading / max(limit, 0.001), throttled: isHolding)
+            Text("\(kind.format(kind == .gpu ? min(reading, 100) : reading)) / \(kind.formatLimit(limit))")
+                .monospacedDigit()
+                .frame(width: 96, alignment: .trailing)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }
 
@@ -276,37 +326,34 @@ struct RuleEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Limit", selection: kindBinding) {
-                Text("Mac W").tag(CapKind?.some(.macPower))
-                Text("App W").tag(CapKind?.some(.appPower))
-                Text("CPU").tag(CapKind?.some(.cpu))
-                Text("GPU").tag(CapKind?.some(.gpu))
-                Text("None").tag(CapKind?.none)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            if let kind = settings.capKind {
-                HStack {
-                    Slider(value: Binding(
-                        get: { settings.capValue },
-                        set: { settings.capValue = ($0 / Self.step(for: kind)).rounded() * Self.step(for: kind) }
-                    ), in: Self.range(for: kind))
-                    Text(kind.formatLimit(settings.capValue))
-                        .monospacedDigit()
-                        .frame(width: 56, alignment: .trailing)
-                }
-            }
-            Text(explanation)
+            Text("Turn on one or more limits. The app is slowed down as much as the strictest one needs.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            LimitRow("Power", kind: powerKind, limit: limit(powerKind), caption: Self.caption(for: powerKind)) {
+                Picker("Power", selection: powerKindBinding) {
+                    Text("Whole Mac").tag(CapKind.macPower)
+                    Text("App only").tag(CapKind.appPower)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
+            LimitRow("CPU", kind: .cpu, limit: limit(.cpu), caption: Self.caption(for: .cpu))
+            LimitRow("GPU", kind: .gpu, limit: limit(.gpu), caption: Self.caption(for: .gpu))
+
+            Divider()
             Toggle("Efficiency cores only", isOn: $settings.efficiencyCoresOnly)
-                .help("Runs the app on the low-power cores only, with lower disk and network priority.")
-            Toggle("Keep window responsive", isOn: $settings.spareMainProcess)
-                .help("Never pauses the app's main process; only its helper processes are throttled. Works for apps that render in helpers, like Topaz Video AI's ffmpeg.")
-                .disabled(settings.capKind == nil)
+                .help("Runs the app on the low-power cores only, with lower disk and network priority. Works with or without a limit.")
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle("Keep window responsive", isOn: $settings.spareMainProcess)
+                    .disabled(settings.limits.isEmpty)
+                Text("Pauses only the app's helper processes, like Topaz Video AI's ffmpeg, so its window stays smooth.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack {
                 Spacer()
@@ -317,29 +364,34 @@ struct RuleEditor: View {
         .font(.callout)
     }
 
-    private var kindBinding: Binding<CapKind?> {
+    private func limit(_ kind: CapKind) -> Binding<Double?> {
+        Binding(get: { settings.limits[kind] }, set: { settings.limits[kind] = $0 })
+    }
+
+    /// Mac power unless the app's own power is limited instead.
+    private var powerKind: CapKind { settings.limits[.appPower] != nil ? .appPower : .macPower }
+
+    private var powerKindBinding: Binding<CapKind> {
         Binding(
-            get: { settings.capKind },
+            get: { powerKind },
             set: { kind in
-                guard kind != settings.capKind else { return }
-                settings.capKind = kind
-                if let kind { settings.capValue = Self.defaultValue(for: kind) }
+                guard kind != powerKind else { return }
+                settings.limits[powerKind] = nil
+                settings.limits[kind] = Self.defaultValue(for: kind)
             }
         )
     }
 
-    private var explanation: String {
-        switch settings.capKind {
-        case .macPower?:
-            "Keeps the whole Mac under this, by slowing only this app. Like Low Power Mode, but for one app."
-        case .appPower?:
-            "The app's own CPU, GPU and Neural Engine power. Memory, fans and the display add more on top."
-        case .cpu?:
-            "100% is one core; \(Self.coreCount * 100)% is every core."
-        case .gpu?:
+    static func caption(for kind: CapKind) -> String {
+        switch kind {
+        case .macPower:
+            "Keeps the whole Mac under this by slowing only this app. Like Low Power Mode, but for one app."
+        case .appPower:
+            "The app's own CPU, GPU and Neural Engine power. Memory, display and fans come on top."
+        case .cpu:
+            "As in Activity Monitor: 100% is one core, \(coreCount * 100)% is all \(coreCount)."
+        case .gpu:
             "Share of the time the GPU spends on this app."
-        case nil:
-            "No cap. Use “Efficiency cores only” to slow the app down gently."
         }
     }
 
@@ -369,5 +421,57 @@ struct RuleEditor: View {
         case .cpu: Double(coreCount * 50)
         case .gpu: 50
         }
+    }
+}
+
+/// A limit that can be turned on and off, with a slider for its cap.
+private struct LimitRow<Accessory: View>: View {
+    let title: String
+    let kind: CapKind
+    @Binding var limit: Double?
+    let caption: String
+    let accessory: Accessory
+
+    init(_ title: String, kind: CapKind, limit: Binding<Double?>, caption: String, @ViewBuilder accessory: () -> Accessory) {
+        self.title = title
+        self.kind = kind
+        _limit = limit
+        self.caption = caption
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Toggle(title, isOn: Binding(
+                    get: { limit != nil },
+                    set: { limit = $0 ? RuleEditor.defaultValue(for: kind) : nil }
+                ))
+                Spacer()
+                if limit != nil { accessory }
+            }
+            if let value = limit {
+                HStack {
+                    let step = RuleEditor.step(for: kind)
+                    Slider(value: Binding(
+                        get: { value },
+                        set: { limit = ($0 / step).rounded() * step }
+                    ), in: RuleEditor.range(for: kind))
+                    Text(kind.formatLimit(value))
+                        .monospacedDigit()
+                        .frame(width: 56, alignment: .trailing)
+                }
+                Text(caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+extension LimitRow where Accessory == EmptyView {
+    init(_ title: String, kind: CapKind, limit: Binding<Double?>, caption: String) {
+        self.init(title, kind: kind, limit: limit, caption: caption) { EmptyView() }
     }
 }

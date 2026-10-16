@@ -77,11 +77,11 @@ final class ThrottlingTests {
     }
 
     @Test func limiterHoldsACPUCap() {
-        let limiter = Limiter(target: .process(named: name), settings: LimitSettings(capKind: .cpu, capValue: 30))
+        let limiter = Limiter(target: .process(named: name), settings: LimitSettings(limits: [.cpu: 30]))
         var readings: [Double] = []
         for _ in 0..<16 {
             let status = limiter.tick()
-            if let measured = status.measured { readings.append(measured) }
+            if let measured = status.readings[.cpu] { readings.append(measured) }
             Thread.sleep(forTimeInterval: 0.5)
         }
         limiter.stop()
@@ -89,6 +89,26 @@ final class ThrottlingTests {
         let settled = readings.suffix(6)
         let average = settled.reduce(0, +) / Double(settled.count)
         #expect(abs(average - 30) < 10, "settled readings \(Array(settled))")
+        #expect(!isStopped())
+    }
+
+    @Test func limiterHoldsTheTightestOfSeveralLimits() {
+        let settings = LimitSettings(limits: [.cpu: 40, .gpu: 50, .appPower: 500])
+        let limiter = Limiter(target: .process(named: name), settings: settings)
+        var statuses: [LimiterStatus] = []
+        for _ in 0..<16 {
+            statuses.append(limiter.tick())
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        limiter.stop()
+
+        let settled = statuses.suffix(6)
+        let cpu = settled.compactMap { $0.readings[.cpu] }
+        let average = cpu.reduce(0, +) / Double(max(cpu.count, 1))
+        #expect(abs(average - 40) < 12, "settled CPU readings \(cpu)")
+        #expect(settled.allSatisfy { $0.tightestCap == .cpu && $0.readings[.appPower] != nil })
+        // A CPU-only load keeps short cycles.
+        #expect(settled.allSatisfy { $0.period == Limiter.shortPeriod })
         #expect(!isStopped())
     }
 

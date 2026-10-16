@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// Renders the panel to a PNG, for checking the layout without clicking the menu bar:
 /// `AppPowerDistributor --snapshot out.png [--snapshot-rule <app> [seconds]]` adds a
 /// temporary limit for <app> and lets it run for a few seconds first.
+/// `--snapshot-limits gpu=50,cpu=200` sets that limit's caps (default: Mac power 60 W).
 @MainActor
 enum Snapshot {
     static func render(to path: String) {
@@ -71,6 +72,16 @@ enum Snapshot {
            let target = try? AppCatalog.target(for: arguments[flag + 1]) {
             model.addRule(for: target)
             temporaryRule = model.rules.last?.id
+            if let flag = arguments.firstIndex(of: "--snapshot-limits"), flag + 1 < arguments.count {
+                var limits: [CapKind: Double] = [:]
+                for pair in arguments[flag + 1].split(separator: ",") {
+                    let parts = pair.split(separator: "=")
+                    if parts.count == 2, let kind = CapKind(rawValue: String(parts[0])), let value = Double(parts[1]) {
+                        limits[kind] = value
+                    }
+                }
+                model.rules[model.rules.count - 1].settings.limits = limits
+            }
         }
         let seconds = arguments.firstIndex(of: "--snapshot-rule").flatMap { $0 + 2 < arguments.count ? Int(arguments[$0 + 2]) : nil } ?? 2
         for _ in 0..<max(seconds, 2) {
